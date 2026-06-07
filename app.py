@@ -1,10 +1,11 @@
 """
-Lamako PDF Server — Flask + ReportLab
+Lamako PDF Server — Flask + ReportLab + Matplotlib
 Generates professional post-event reports as PDF.
 Deployed on Railway.
 """
 import io
 import os
+import tempfile
 from datetime import datetime
 
 from flask import Flask, request, jsonify, send_file
@@ -15,13 +16,33 @@ from reportlab.lib.units import mm, cm
 from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
 from reportlab.platypus import (
     SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer,
-    Image, HRFlowable, KeepTogether
+    Image, HRFlowable, KeepTogether, PageBreak
 )
-from reportlab.graphics.shapes import Drawing, Wedge, String, Circle
-from reportlab.graphics.charts.piecharts import Pie
-from reportlab.graphics import renderPDF
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
 
 app = Flask(__name__)
+
+# ─── Try to register Raleway font ─────────────────────────────────────────────
+FONT_DIR = os.path.join(os.path.dirname(__file__), 'fonts')
+FONT_REGULAR = 'Helvetica'
+FONT_BOLD = 'Helvetica-Bold'
+if os.path.isdir(FONT_DIR):
+    for fname in os.listdir(FONT_DIR):
+        if fname.endswith('.ttf'):
+            try:
+                name = fname.replace('.ttf', '').replace('-', '')
+                pdfmetrics.registerFont(TTFont(name, os.path.join(FONT_DIR, fname)))
+            except:
+                pass
+
+# ─── Logo path ─────────────────────────────────────────────────────────────────
+LOGO_PATH = os.path.join(os.path.dirname(__file__), 'logo.png')
 
 # ─── Colors ────────────────────────────────────────────────────────────────────
 BLUE = colors.HexColor('#2563EB')
@@ -42,7 +63,6 @@ TEAL_DARK = colors.HexColor('#115E59')
 
 # ─── Helpers ───────────────────────────────────────────────────────────────────
 def fmt(val):
-    """Format number with space thousands separator."""
     if val is None or val == '':
         return '—'
     try:
@@ -54,17 +74,89 @@ def fmt(val):
         return str(val)
 
 def fmt_ar(val):
-    """Format as Ariary amount."""
     return f'{fmt(val)} Ar'
 
 def pct(val):
-    """Format percentage."""
     if val is None:
         return '—'
     try:
         return f'{float(val):.1f} %'
     except (ValueError, TypeError):
         return str(val)
+
+
+def make_pie_chart(labels, sizes, colors_list, title=''):
+    """Generate a pie chart and return path to temp PNG."""
+    fig, ax = plt.subplots(1, 1, figsize=(2.5, 2.5))
+    if sum(sizes) == 0:
+        sizes = [1]
+        labels = ['N/A']
+        colors_list = ['#E5E7EB']
+    wedges, texts, autotexts = ax.pie(
+        sizes, labels=None, autopct='%1.0f%%',
+        colors=colors_list, startangle=90,
+        textprops={'fontsize': 7}
+    )
+    ax.set_title(title, fontsize=8, fontweight='bold', pad=5)
+    ax.legend(labels, loc='lower center', bbox_to_anchor=(0.5, -0.2),
+              fontsize=6, ncol=2, frameon=False)
+    plt.tight_layout()
+    tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+    plt.savefig(tmp.name, dpi=150, bbox_inches='tight', transparent=True)
+    plt.close(fig)
+    return tmp.name
+
+
+def make_bar_chart(dates, counts, peak_day='', title='Ventes par jour'):
+    """Generate a bar chart for daily sales."""
+    fig, ax = plt.subplots(1, 1, figsize=(5.5, 2.2))
+    x_labels = [d[5:] if len(d) > 5 else d for d in dates]  # MM-DD format
+    bar_colors = ['#D97706' if d == peak_day else '#2563EB' for d in dates]
+    bars = ax.bar(range(len(dates)), counts, color=bar_colors, width=0.7)
+    ax.set_xticks(range(len(dates)))
+    ax.set_xticklabels(x_labels, fontsize=6, rotation=45, ha='right')
+    ax.set_ylabel('Billets', fontsize=7)
+    ax.set_title(title, fontsize=9, fontweight='bold')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(axis='y', labelsize=6)
+    for bar, count in zip(bars, counts):
+        if count > 0:
+            ax.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.3,
+                    str(count), ha='center', va='bottom', fontsize=6)
+    plt.tight_layout()
+    tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+    plt.savefig(tmp.name, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    return tmp.name
+
+
+def make_category_chart(cat_ch_rows, title='Ventes par catégorie'):
+    """Generate grouped bar chart: brute vs nette per category."""
+    if not cat_ch_rows:
+        return None
+    labels = [r.get('cat', '')[:25] for r in cat_ch_rows]
+    brut = [r.get('brut', 0) / 1_000_000 for r in cat_ch_rows]
+    net = [r.get('net', 0) / 1_000_000 for r in cat_ch_rows]
+
+    fig, ax = plt.subplots(1, 1, figsize=(5.5, 2.0))
+    x = np.arange(len(labels))
+    width = 0.35
+    ax.barh(x - width/2, brut, width, label='Recette brute', color='#2563EB')
+    ax.barh(x + width/2, net, width, label='Recette nette', color='#059669')
+    ax.set_yticks(x)
+    ax.set_yticklabels(labels, fontsize=7)
+    ax.set_xlabel('Millions Ar', fontsize=7)
+    ax.set_title(title, fontsize=9, fontweight='bold')
+    ax.legend(fontsize=7, frameon=False)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(axis='x', labelsize=6)
+    plt.tight_layout()
+    tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+    plt.savefig(tmp.name, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    return tmp.name
 
 
 # ─── PDF Builder ───────────────────────────────────────────────────────────────
@@ -80,33 +172,18 @@ def build_pdf(data):
     )
 
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(
-        'Title2', parent=styles['Heading1'],
-        fontName='Helvetica-Bold', fontSize=18, textColor=DARK,
-        spaceAfter=2*mm
-    ))
-    styles.add(ParagraphStyle(
-        'Section', parent=styles['Heading2'],
-        fontName='Helvetica-Bold', fontSize=13, textColor=BLUE,
-        spaceBefore=6*mm, spaceAfter=3*mm
-    ))
-    styles.add(ParagraphStyle(
-        'SubSection', parent=styles['Heading3'],
-        fontName='Helvetica-Bold', fontSize=10, textColor=DARK,
-        spaceBefore=3*mm, spaceAfter=2*mm
-    ))
-    styles.add(ParagraphStyle(
-        'Normal2', parent=styles['Normal'],
-        fontName='Helvetica', fontSize=8.5, textColor=DARK
-    ))
-    styles.add(ParagraphStyle(
-        'Small', parent=styles['Normal'],
-        fontName='Helvetica', fontSize=7, textColor=GRAY
-    ))
-    styles.add(ParagraphStyle(
-        'Footer', parent=styles['Normal'],
-        fontName='Helvetica', fontSize=7, textColor=GRAY
-    ))
+    styles.add(ParagraphStyle('Title2', parent=styles['Heading1'],
+        fontName=FONT_BOLD, fontSize=18, textColor=DARK, spaceAfter=2*mm))
+    styles.add(ParagraphStyle('Section', parent=styles['Heading2'],
+        fontName=FONT_BOLD, fontSize=13, textColor=BLUE, spaceBefore=6*mm, spaceAfter=3*mm))
+    styles.add(ParagraphStyle('SubSection', parent=styles['Heading3'],
+        fontName=FONT_BOLD, fontSize=10, textColor=DARK, spaceBefore=3*mm, spaceAfter=2*mm))
+    styles.add(ParagraphStyle('Normal2', parent=styles['Normal'],
+        fontName=FONT_REGULAR, fontSize=8.5, textColor=DARK))
+    styles.add(ParagraphStyle('Small', parent=styles['Normal'],
+        fontName=FONT_REGULAR, fontSize=7, textColor=GRAY))
+    styles.add(ParagraphStyle('Footer', parent=styles['Normal'],
+        fontName=FONT_REGULAR, fontSize=7, textColor=GRAY))
 
     elements = []
     page_width = A4[0] - 30*mm
@@ -122,9 +199,14 @@ def build_pdf(data):
     now = datetime.utcnow().strftime('%d/%m/%Y à %H:%M')
 
     # ─── Header ────────────────────────────────────────────────────────────────
+    if os.path.isfile(LOGO_PATH):
+        logo_cell = Image(LOGO_PATH, width=35*mm, height=18*mm)
+    else:
+        logo_cell = Paragraph('<b><font size="16" color="#1F2937">Ticket</font><font size="10" color="#D97706"> by</font><br/><font size="18" color="#1F2937">LAMAKO</font></b>', styles['Normal2'])
+
     header_data = [[
-        Paragraph('<b><font size="16" color="#1F2937">Ticket</font><font size="10" color="#D97706"> by</font><br/><font size="18" color="#1F2937">LAMAKO</font></b>', styles['Normal2']),
-        Paragraph(f'<b><font size="16">Rapport Post-Événement</font></b><br/><font size="8" color="#6B7280">Généré le {now}</font>', ParagraphStyle('RightHeader', parent=styles['Normal2'], alignment=TA_RIGHT))
+        logo_cell,
+        Paragraph(f'<b><font size="16">Rapport Post-Événement</font></b><br/><font size="8" color="#6B7280">Généré le {now}</font>', ParagraphStyle('RH', parent=styles['Normal2'], alignment=TA_RIGHT))
     ]]
     header_table = Table(header_data, colWidths=[page_width*0.5, page_width*0.5])
     header_table.setStyle(TableStyle([
@@ -140,7 +222,7 @@ def build_pdf(data):
     banner.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,-1), DARK),
         ('TEXTCOLOR', (0,0), (-1,-1), WHITE),
-        ('FONTNAME', (0,0), (-1,-1), 'Helvetica-Bold'),
+        ('FONTNAME', (0,0), (-1,-1), FONT_BOLD),
         ('FONTSIZE', (0,0), (-1,-1), 7.5),
         ('ALIGN', (0,0), (-1,-1), 'LEFT'),
         ('LEFTPADDING', (0,0), (-1,-1), 8),
@@ -153,12 +235,14 @@ def build_pdf(data):
     # ─── KPI Section ───────────────────────────────────────────────────────────
     elements.append(Paragraph('Indicateurs Clés de Performance', styles['Section']))
 
-    def kpi_cell(label, value, sub='', bg=WHITE, text_color=DARK):
-        content = f'<font size="7" color="#6B7280">{label}</font><br/><b><font size="13" color="{text_color.hexval() if hasattr(text_color, "hexval") else "#1F2937"}">{value}</font></b>'
+    def kpi_cell(label, value, sub='', text_color=DARK):
+        tc = text_color.hexval() if hasattr(text_color, 'hexval') else '#1F2937'
+        content = f'<font size="7" color="#6B7280">{label}</font><br/><b><font size="13" color="{tc}">{value}</font></b>'
         if sub:
             content += f'<br/><font size="6.5" color="#6B7280">{sub}</font>'
         return Paragraph(content, styles['Normal2'])
 
+    total_tickets = max(kpi.get('tickets_sold', 1), 1)
     kpi_row1 = [
         kpi_cell('TICKETS VENDUS', fmt(kpi.get('tickets_sold', 0)),
                  f"{fmt(kpi.get('tickets_payants',0))} payants · {fmt(kpi.get('tickets_gratuits',0))} gratuits"),
@@ -171,19 +255,19 @@ def build_pdf(data):
         kpi_cell('CHECK-INS', fmt(kpi.get('checkins', 0)),
                  f"{pct(kpi.get('taux_checkin',0))} de présence"),
         kpi_cell('NON PRÉSENTÉS', fmt(kpi.get('non_checkins', 0)),
-                 f"{pct(100 - float(kpi.get('taux_checkin',0)) if kpi.get('taux_checkin') else 0)} absents"),
+                 f"{pct(100 - float(kpi.get('taux_checkin',0) or 0))} absents"),
         kpi_cell('PANIER MOYEN', fmt_ar(kpi.get('aov', 0)),
                  f"{fmt(kpi.get('nb_commandes',0))} commandes"),
         kpi_cell('MONTANT À REVERSER', fmt_ar(kpi.get('montant_reverser', 0)),
-                 'Après toutes déductions', bg=GREEN_LIGHT, text_color=GREEN),
+                 'Après toutes déductions', text_color=GREEN),
     ]
     kpi_row3 = [
         kpi_cell('CANAL WEB', fmt(kpi.get('web_tickets', 0)),
-                 f"{pct(round(kpi.get('web_tickets',0)/max(kpi.get('tickets_sold',1),1)*100,1))} des billets"),
+                 f"{pct(round(kpi.get('web_tickets',0)/total_tickets*100,1))} des billets"),
         kpi_cell('GUICHET LAMAKO', fmt(kpi.get('pos_lamako_tickets', 0)),
-                 f"{pct(round(kpi.get('pos_lamako_tickets',0)/max(kpi.get('tickets_sold',1),1)*100,1))}"),
+                 f"{pct(round(kpi.get('pos_lamako_tickets',0)/total_tickets*100,1))}"),
         kpi_cell('GUICHET CLIENT', fmt(kpi.get('pos_client_tickets', 0)),
-                 f"{pct(round(kpi.get('pos_client_tickets',0)/max(kpi.get('tickets_sold',1),1)*100,1))}"),
+                 f"{pct(round(kpi.get('pos_client_tickets',0)/total_tickets*100,1))}"),
         kpi_cell('JOUR DE POINTE', kpi.get('peak_day', '—'),
                  f"{fmt(kpi.get('peak_count',0))} billets"),
     ]
@@ -208,47 +292,368 @@ def build_pdf(data):
     # ─── Vue d'ensemble (Pie Charts) ──────────────────────────────────────────
     elements.append(Paragraph('VUE D\'ENSEMBLE', styles['Section']))
 
-    # Pie chart - Répartition billets
     payants = kpi.get('tickets_payants', 0)
-    gratuits = kpi.get('tickets_gratuits', 0)
-    total_tickets = kpi.get('tickets_sold', 1)
-
-    # Pie chart - Taux de présence
+    gratuits_count = kpi.get('tickets_gratuits', 0)
     checkins = kpi.get('checkins', 0)
     absents = kpi.get('non_checkins', 0)
 
-    pie_info = f'<b>Répartition billets</b>: {fmt(payants)} payants, {fmt(gratuits)} gratuits | <b>Taux de présence</b>: {fmt(checkins)} présents, {fmt(absents)} absents ({pct(kpi.get("taux_checkin",0))})'
-    elements.append(Paragraph(pie_info, styles['Normal2']))
+    # Generate pie charts
+    try:
+        pie1 = make_pie_chart(
+            ['Payants', 'Gratuits'], [payants, gratuits_count],
+            ['#2563EB', '#D97706'], 'Répartition billets'
+        )
+        pie2 = make_pie_chart(
+            ['Présents', 'Absents'], [checkins, absents],
+            ['#059669', '#DC2626'], 'Taux de présence'
+        )
+
+        # Payment mode pie
+        by_pay = data.get('by_pay', {})
+        pay_labels_map = data.get('pay_labels', {})
+        pay_sizes = []
+        pay_names = []
+        pay_colors = ['#2563EB', '#059669', '#D97706', '#DC2626', '#6B7280', '#0D9488', '#7C3AED', '#EC4899']
+        for pk, pl in pay_labels_map.items():
+            count = 0
+            if isinstance(by_pay.get(pk), dict):
+                count = by_pay[pk].get('brut', 0)
+            elif isinstance(by_pay.get(pk), (int, float)):
+                count = by_pay[pk]
+            if count > 0:
+                pay_sizes.append(count)
+                pay_names.append(pl)
+
+        pie3 = make_pie_chart(
+            pay_names if pay_names else ['N/A'],
+            pay_sizes if pay_sizes else [1],
+            pay_colors[:len(pay_names)] if pay_names else ['#E5E7EB'],
+            'Modes de paiement'
+        )
+
+        # Add pie charts in a row
+        pie_row = [[Image(pie1, width=55*mm, height=55*mm),
+                    Image(pie2, width=55*mm, height=55*mm),
+                    Image(pie3, width=55*mm, height=55*mm)]]
+        pie_table = Table(pie_row, colWidths=[page_width/3]*3)
+        pie_table.setStyle(TableStyle([
+            ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ]))
+        elements.append(pie_table)
+    except Exception as e:
+        pie_info = f'<b>Répartition billets</b>: {fmt(payants)} payants, {fmt(gratuits_count)} gratuits | <b>Taux de présence</b>: {fmt(checkins)} présents, {fmt(absents)} absents ({pct(kpi.get("taux_checkin",0))})'
+        elements.append(Paragraph(pie_info, styles['Normal2']))
+
     elements.append(Spacer(1, 4*mm))
 
-    # ─── Ventes par catégorie ──────────────────────────────────────────────────
-    elements.append(Paragraph('VENTES PAR CATÉGORIE', styles['Section']))
+    # ─── Ventes par jour (Bar Chart) ──────────────────────────────────────────
+    sales_by_day = data.get('sales_by_day', {})
+    if sales_by_day:
+        elements.append(Paragraph('VENTES PAR JOUR', styles['Section']))
+        desc = "Nombre de billets vendus chaque jour. La barre orange indique le jour de pointe. L'axe X montre les dates (MM-JJ), l'axe Y le nombre de billets."
+        elements.append(Paragraph(desc, styles['Small']))
+        elements.append(Spacer(1, 2*mm))
 
-    # Cat/Pay table if available
-    cat_pay_rows = data.get('cat_pay_rows', [])
-    if cat_pay_rows:
-        pay_labels = data.get('pay_labels', {})
-        pay_keys = list(pay_labels.keys()) if pay_labels else []
-        header_row = ['Catégorie'] + [pay_labels.get(k, k) for k in pay_keys] + ['Total']
-        table_data = [header_row]
-        for row in cat_pay_rows:
-            r = [row.get('label', '')]
-            for pk in pay_keys:
-                r.append(fmt(row.get('pays', {}).get(pk, {}).get('count', 0)))
-            r.append(fmt(row.get('total_count', 0)))
-            table_data.append(r)
+        try:
+            sorted_days = sorted(sales_by_day.keys())
+            counts = [sales_by_day[d] for d in sorted_days]
+            peak = kpi.get('peak_day', '')
+            bar_path = make_bar_chart(sorted_days, counts, peak)
+            elements.append(Image(bar_path, width=page_width, height=55*mm))
+        except Exception:
+            pass
+        elements.append(Spacer(1, 4*mm))
 
-        n_cols = len(header_row)
-        col_widths = [page_width * 0.25] + [page_width * 0.75 / (n_cols - 1)] * (n_cols - 1)
-        t = Table(table_data, colWidths=col_widths)
+    # ─── Ventes par catégorie (Chart + Table) ─────────────────────────────────
+    cat_ch_rows = data.get('cat_ch_rows', [])
+    if cat_ch_rows:
+        elements.append(Paragraph('VENTES PAR CATÉGORIE', styles['Section']))
+
+        # Chart
+        try:
+            chart_path = make_category_chart(cat_ch_rows)
+            if chart_path:
+                desc2 = "Comparaison recette brute (bleu) vs recette nette (vert) par catégorie de billet, en millions d'Ariary."
+                elements.append(Paragraph(desc2, styles['Small']))
+                elements.append(Spacer(1, 2*mm))
+                elements.append(Image(chart_path, width=page_width, height=50*mm))
+                elements.append(Spacer(1, 3*mm))
+        except Exception:
+            pass
+
+        # Table: Catégorie | Billets | Prix Unit. | Recette Brute | Remises | Recette Nette | Check-ins | Taux Prés.
+        header = ['CATÉGORIE', 'BILLETS', 'PRIX UNIT.', 'RECETTE BRUTE', 'REMISES', 'RECETTE NETTE', 'CHECK-INS', 'TAUX PRÉS.']
+        table_data = [header]
+        for row in cat_ch_rows:
+            table_data.append([
+                Paragraph(str(row.get('cat', '')), styles['Small']),
+                fmt(row.get('total', 0)),
+                fmt_ar(row.get('unit_price', 0)),
+                fmt_ar(row.get('brut', 0)),
+                f"- {fmt_ar(row.get('remise', 0))}",
+                fmt_ar(row.get('net', 0)),
+                fmt(0),  # checkins per cat not available in this structure
+                pct(0),
+            ])
+        # Total row
+        tot_billets = sum(r.get('total', 0) for r in cat_ch_rows)
+        tot_brut = sum(r.get('brut', 0) for r in cat_ch_rows)
+        tot_remise = sum(r.get('remise', 0) for r in cat_ch_rows)
+        tot_net = sum(r.get('net', 0) for r in cat_ch_rows)
+        table_data.append(['TOTAL', fmt(tot_billets), '', fmt_ar(tot_brut), f"- {fmt_ar(tot_remise)}", fmt_ar(tot_net), '', ''])
+
+        cw = [page_width*0.22, page_width*0.08, page_width*0.12, page_width*0.14, page_width*0.12, page_width*0.14, page_width*0.09, page_width*0.09]
+        t = Table(table_data, colWidths=cw)
         t.setStyle(TableStyle([
             ('BACKGROUND', (0,0), (-1,0), BLUE),
             ('TEXTCOLOR', (0,0), (-1,0), WHITE),
-            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0,0), (-1,-1), 8),
+            ('FONTNAME', (0,0), (-1,0), FONT_BOLD),
+            ('FONTSIZE', (0,0), (-1,-1), 7),
             ('ALIGN', (1,0), (-1,-1), 'CENTER'),
+            ('ALIGN', (0,0), (0,-1), 'LEFT'),
             ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E5E7EB')),
-            ('ROWBACKGROUNDS', (0,1), (-1,-1), [WHITE, GRAY_LIGHT]),
+            ('ROWBACKGROUNDS', (0,1), (-1,-2), [WHITE, GRAY_LIGHT]),
+            ('BACKGROUND', (0,-1), (-1,-1), BLUE_LIGHT),
+            ('FONTNAME', (0,-1), (-1,-1), FONT_BOLD),
+            ('TOPPADDING', (0,0), (-1,-1), 3),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 3),
+        ]))
+        elements.append(t)
+        elements.append(Spacer(1, 4*mm))
+
+    # ─── Ventes par catégorie & mode de paiement ──────────────────────────────
+    cat_pay_rows = data.get('cat_pay_rows', [])
+    pay_labels = data.get('pay_labels', {})
+    if cat_pay_rows and pay_labels:
+        elements.append(Paragraph('VENTES PAR CATÉGORIE & MODE DE PAIEMENT', styles['Section']))
+
+        pay_keys = list(pay_labels.keys())
+        # Shorten labels for table header
+        short_labels = {
+            'coupon100': 'COUPON\n100%',
+            'especes_lamako': 'ESPÈCES\nLAMAKO',
+            'cheque_lamako': 'CHÈQUE\nLAMAKO',
+            'mvola': 'MVOLA',
+            'orange': 'ORANGE\nMONEY',
+            'airtel': 'AIRTEL',
+            'especes_client': 'ESPÈCES\nCLIENT',
+            'cheque_client': 'CHÈQUE\nCLIENT',
+            'carte': 'CARTE',
+            'autre': 'AUTRE',
+        }
+        header_row = ['CATÉGORIE'] + [short_labels.get(k, pay_labels.get(k, k)) for k in pay_keys] + ['Total', 'RECETTE\nBRUTE']
+        table_data = [header_row]
+
+        for row in cat_pay_rows:
+            cat_name = row.get('cat', '')
+            cells = row.get('cells', {})
+            r = [Paragraph(cat_name, styles['Small'])]
+            for pk in pay_keys:
+                cell_data = cells.get(pk, {})
+                count = cell_data.get('count', 0) if isinstance(cell_data, dict) else 0
+                brut = cell_data.get('brut', 0) if isinstance(cell_data, dict) else 0
+                if count > 0:
+                    r.append(f"{fmt_ar(brut)}")
+                else:
+                    r.append('—')
+            r.append(fmt(row.get('total_count', 0)))
+            r.append(fmt_ar(row.get('total_brut', 0)))
+            table_data.append(r)
+
+        # Total row
+        col_totals = data.get('col_totals', {})
+        total_row = ['TOTAL']
+        for pk in pay_keys:
+            ct = col_totals.get(pk, {})
+            brut = ct.get('brut', 0) if isinstance(ct, dict) else 0
+            if brut > 0:
+                total_row.append(fmt_ar(brut))
+            else:
+                total_row.append('—')
+        total_row.append(fmt(sum(r.get('total_count', 0) for r in cat_pay_rows)))
+        total_row.append(fmt_ar(sum(r.get('total_brut', 0) for r in cat_pay_rows)))
+        table_data.append(total_row)
+
+        n_cols = len(header_row)
+        cw = [page_width * 0.18] + [page_width * 0.82 / (n_cols - 1)] * (n_cols - 1)
+        t = Table(table_data, colWidths=cw)
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), BLUE),
+            ('TEXTCOLOR', (0,0), (-1,0), WHITE),
+            ('FONTNAME', (0,0), (-1,0), FONT_BOLD),
+            ('FONTSIZE', (0,0), (-1,-1), 6.5),
+            ('ALIGN', (1,0), (-1,-1), 'CENTER'),
+            ('ALIGN', (0,0), (0,-1), 'LEFT'),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E5E7EB')),
+            ('ROWBACKGROUNDS', (0,1), (-1,-2), [WHITE, GRAY_LIGHT]),
+            ('BACKGROUND', (0,-1), (-1,-1), BLUE_LIGHT),
+            ('FONTNAME', (0,-1), (-1,-1), FONT_BOLD),
+            ('TOPPADDING', (0,0), (-1,-1), 3),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 3),
+        ]))
+        elements.append(t)
+        elements.append(Spacer(1, 4*mm))
+
+    # ─── Détail Mobile Money ──────────────────────────────────────────────────
+    mm_breakdown = data.get('mm_breakdown', {})
+    mm_labels = {'mvola': 'MVola', 'orange': 'Orange Money (Papi)', 'airtel': 'Airtel Money'}
+    if mm_breakdown:
+        elements.append(Paragraph('DÉTAIL MOBILE MONEY (MVola · Orange Money · Airtel)', styles['Section']))
+
+        header = ['OPÉRATEUR', 'BILLETS\nWEB', 'RECETTE\nWEB', 'BILLETS\nPOS', 'RECETTE\nPOS', 'TOTAL\nBILLETS', 'RECETTE\nBRUTE', 'RECETTE\nNETTE']
+        table_data = [header]
+        total_web_b = 0; total_pos_b = 0; total_all = 0; total_brut = 0; total_net = 0
+
+        for pk, label in mm_labels.items():
+            bd = mm_breakdown.get(pk, {})
+            web = bd.get('web', {})
+            pos = bd.get('pos', {})
+            w_count = web.get('count', 0)
+            w_brut = web.get('brut', 0)
+            p_count = pos.get('count', 0)
+            p_brut = pos.get('brut', 0)
+            t_count = w_count + p_count
+            t_brut = w_brut + p_brut
+            t_net = web.get('net', 0) + pos.get('net', 0)
+            total_web_b += w_count; total_pos_b += p_count
+            total_all += t_count; total_brut += t_brut; total_net += t_net
+
+            table_data.append([
+                label,
+                fmt(w_count) if w_count > 0 else '0',
+                fmt_ar(w_brut) if w_brut > 0 else '—',
+                fmt(p_count) if p_count > 0 else '0',
+                fmt_ar(p_brut) if p_brut > 0 else '—',
+                fmt(t_count),
+                fmt_ar(t_brut),
+                fmt_ar(t_net),
+            ])
+
+        # Total row
+        table_data.append([
+            'TOTAL MOBILE\nMONEY', fmt(total_web_b), '—', fmt(total_pos_b), '—',
+            fmt(total_all), fmt_ar(total_brut), fmt_ar(total_net)
+        ])
+
+        cw = [page_width*0.18, page_width*0.09, page_width*0.13, page_width*0.09, page_width*0.13, page_width*0.09, page_width*0.14, page_width*0.15]
+        t = Table(table_data, colWidths=cw)
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), BLUE),
+            ('TEXTCOLOR', (0,0), (-1,0), WHITE),
+            ('FONTNAME', (0,0), (-1,0), FONT_BOLD),
+            ('FONTSIZE', (0,0), (-1,-1), 7),
+            ('ALIGN', (1,0), (-1,-1), 'CENTER'),
+            ('ALIGN', (0,0), (0,-1), 'LEFT'),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E5E7EB')),
+            ('ROWBACKGROUNDS', (0,1), (-1,-2), [WHITE, GRAY_LIGHT]),
+            ('BACKGROUND', (0,-1), (-1,-1), BLUE_LIGHT),
+            ('FONTNAME', (0,-1), (-1,-1), FONT_BOLD),
+            ('TOPPADDING', (0,0), (-1,-1), 3),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 3),
+        ]))
+        elements.append(t)
+        elements.append(Spacer(1, 1*mm))
+        elements.append(Paragraph('Détail des paiements Mobile Money (MVola, Orange Money, Airtel) ventilés par canal Web et Guichet (POS).', styles['Small']))
+        elements.append(Spacer(1, 4*mm))
+
+    # ─── Carte Bancaire — Détail Web / POS ────────────────────────────────────
+    carte_breakdown = data.get('carte_breakdown', {})
+    if carte_breakdown:
+        elements.append(Paragraph('CARTE BANCAIRE — DÉTAIL WEB / POS', styles['Section']))
+
+        web_cb = carte_breakdown.get('web', {})
+        pos_cb = carte_breakdown.get('pos', {})
+        w_count = web_cb.get('count', 0)
+        p_count = pos_cb.get('count', 0)
+        t_count = w_count + p_count
+        w_brut = web_cb.get('brut', 0)
+        p_brut = pos_cb.get('brut', 0)
+        w_net = web_cb.get('net', 0)
+        p_net = pos_cb.get('net', 0)
+
+        header = ['CANAL', 'BILLETS', '% BILLETS', 'RECETTE BRUTE', 'RECETTE NETTE']
+        table_data = [header]
+        pct_w = round(w_count / max(t_count, 1) * 100) if t_count else 0
+        pct_p = round(p_count / max(t_count, 1) * 100) if t_count else 0
+        table_data.append(['Web (en ligne)', fmt(w_count), f'{pct_w}%', fmt_ar(w_brut), fmt_ar(w_net)])
+        table_data.append(['POS (guichet)', fmt(p_count), f'{pct_p}%', fmt_ar(p_brut), fmt_ar(p_net)])
+        table_data.append(['TOTAL CARTE', fmt(t_count), '100%', fmt_ar(w_brut + p_brut), fmt_ar(w_net + p_net)])
+
+        cw = [page_width*0.25, page_width*0.15, page_width*0.15, page_width*0.22, page_width*0.23]
+        t = Table(table_data, colWidths=cw)
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), BLUE),
+            ('TEXTCOLOR', (0,0), (-1,0), WHITE),
+            ('FONTNAME', (0,0), (-1,0), FONT_BOLD),
+            ('FONTSIZE', (0,0), (-1,-1), 7.5),
+            ('ALIGN', (1,0), (-1,-1), 'CENTER'),
+            ('ALIGN', (0,0), (0,-1), 'LEFT'),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E5E7EB')),
+            ('ROWBACKGROUNDS', (0,1), (-1,-2), [WHITE, GRAY_LIGHT]),
+            ('BACKGROUND', (0,-1), (-1,-1), BLUE_LIGHT),
+            ('FONTNAME', (0,-1), (-1,-1), FONT_BOLD),
+            ('TOPPADDING', (0,0), (-1,-1), 4),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+        ]))
+        elements.append(t)
+        elements.append(Spacer(1, 1*mm))
+        elements.append(Paragraph('Paiements par carte bancaire ventilés entre le canal Web (en ligne) et le canal POS (guichet).', styles['Small']))
+        elements.append(Spacer(1, 4*mm))
+
+    # ─── Détail Guichet Client ────────────────────────────────────────────────
+    pos_client_breakdown = data.get('pos_client_breakdown', {})
+    if pos_client_breakdown:
+        elements.append(Paragraph('DÉTAIL GUICHET CLIENT — MODES DE PAIEMENT', styles['Section']))
+
+        pc_labels = {
+            'especes': 'Espèces', 'cheque': 'Chèque', 'mvola': 'MVola',
+            'orange': 'Orange Money', 'airtel': 'Airtel Money',
+            'carte': 'Carte Bancaire', 'coupon100': 'Coupon 100%', 'autre': 'Autre'
+        }
+        header = ['MODE DE PAIEMENT', 'BILLETS', '% BILLETS', 'RECETTE BRUTE', 'REMISE', 'RECETTE NETTE']
+        table_data = [header]
+        total_b = 0; total_brut = 0; total_net = 0; total_remise = 0
+
+        for pk, label in pc_labels.items():
+            bd = pos_client_breakdown.get(pk, {})
+            count = bd.get('count', 0)
+            brut = bd.get('brut', 0)
+            net = bd.get('net', 0)
+            remise = bd.get('remise', 0)
+            if count > 0:
+                total_b += count; total_brut += brut; total_net += net; total_remise += remise
+
+        for pk, label in pc_labels.items():
+            bd = pos_client_breakdown.get(pk, {})
+            count = bd.get('count', 0)
+            brut = bd.get('brut', 0)
+            net = bd.get('net', 0)
+            remise = bd.get('remise', 0)
+            if count > 0:
+                pct_val = round(count / max(total_b, 1) * 100)
+                table_data.append([
+                    label, fmt(count), f'{pct_val}%',
+                    fmt_ar(brut),
+                    f"- {fmt_ar(remise)}" if remise > 0 else '—',
+                    fmt_ar(net)
+                ])
+
+        table_data.append(['TOTAL GUICHET CLIENT', fmt(total_b), '100%', fmt_ar(total_brut), f"- {fmt_ar(total_remise)}" if total_remise > 0 else '—', fmt_ar(total_net)])
+
+        cw = [page_width*0.22, page_width*0.12, page_width*0.12, page_width*0.18, page_width*0.14, page_width*0.22]
+        t = Table(table_data, colWidths=cw)
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), BLUE),
+            ('TEXTCOLOR', (0,0), (-1,0), WHITE),
+            ('FONTNAME', (0,0), (-1,0), FONT_BOLD),
+            ('FONTSIZE', (0,0), (-1,-1), 7.5),
+            ('ALIGN', (1,0), (-1,-1), 'CENTER'),
+            ('ALIGN', (0,0), (0,-1), 'LEFT'),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E5E7EB')),
+            ('ROWBACKGROUNDS', (0,1), (-1,-2), [WHITE, GRAY_LIGHT]),
+            ('BACKGROUND', (0,-1), (-1,-1), BLUE_LIGHT),
+            ('FONTNAME', (0,-1), (-1,-1), FONT_BOLD),
             ('TOPPADDING', (0,0), (-1,-1), 4),
             ('BOTTOMPADDING', (0,0), (-1,-1), 4),
         ]))
@@ -259,7 +664,6 @@ def build_pdf(data):
     elements.append(Paragraph('DÉTAIL DES COMMISSIONS & FRAIS LAMAKO', styles['Section']))
 
     comm_detail = commissions.get('detail', [])
-    # Filter out rows with 0 count (no web tickets)
     comm_rows = [r for r in comm_detail if r.get('count', 0) > 0 or r.get('comm', 0) > 0]
 
     if comm_rows:
@@ -277,13 +681,13 @@ def build_pdf(data):
                 fmt_ar(r.get('total', 0)),
             ])
 
-        col_widths = [page_width*0.18, page_width*0.08, page_width*0.16, page_width*0.08,
-                      page_width*0.15, page_width*0.08, page_width*0.14, page_width*0.13]
-        t = Table(table_data, colWidths=col_widths)
-        style_cmds = [
+        cw = [page_width*0.18, page_width*0.08, page_width*0.16, page_width*0.08,
+              page_width*0.15, page_width*0.08, page_width*0.14, page_width*0.13]
+        t = Table(table_data, colWidths=cw)
+        t.setStyle(TableStyle([
             ('BACKGROUND', (0,0), (-1,0), BLUE),
             ('TEXTCOLOR', (0,0), (-1,0), WHITE),
-            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTNAME', (0,0), (-1,0), FONT_BOLD),
             ('FONTSIZE', (0,0), (-1,-1), 7.5),
             ('ALIGN', (1,0), (-1,-1), 'CENTER'),
             ('ALIGN', (0,0), (0,-1), 'LEFT'),
@@ -291,11 +695,9 @@ def build_pdf(data):
             ('ROWBACKGROUNDS', (0,1), (-1,-1), [WHITE, GRAY_LIGHT]),
             ('TOPPADDING', (0,0), (-1,-1), 4),
             ('BOTTOMPADDING', (0,0), (-1,-1), 4),
-            # Total column bold
-            ('FONTNAME', (-1,1), (-1,-1), 'Helvetica-Bold'),
+            ('FONTNAME', (-1,1), (-1,-1), FONT_BOLD),
             ('TEXTCOLOR', (-1,1), (-1,-1), BLUE),
-        ]
-        t.setStyle(TableStyle(style_cmds))
+        ]))
         elements.append(t)
     else:
         elements.append(Paragraph('Aucune commission applicable (pas de ventes Web).', styles['Normal2']))
@@ -323,7 +725,7 @@ def build_pdf(data):
         ('BACKGROUND', (0,0), (-1,0), BLUE_LIGHT),
         ('BACKGROUND', (0,1), (-1,1), ORANGE_LIGHT),
         ('BACKGROUND', (0,2), (-1,2), RED_LIGHT),
-        ('FONTNAME', (0,0), (-1,-1), 'Helvetica-Bold'),
+        ('FONTNAME', (0,0), (-1,-1), FONT_BOLD),
         ('FONTSIZE', (0,0), (-1,-1), 8),
         ('ALIGN', (0,0), (0,-1), 'CENTER'),
         ('ALIGN', (-1,0), (-1,-1), 'RIGHT'),
@@ -359,16 +761,16 @@ def build_pdf(data):
                     f"#{r.get('order_id', '')}",
                     fmt_ar(r.get('amount', 0)),
                     r.get('method', ''),
-                    date_str,
+                    str(date_str),
                     Paragraph(str(r.get('reason', '')), styles['Small']),
                 ])
 
-            col_widths = [page_width*0.12, page_width*0.15, page_width*0.18, page_width*0.13, page_width*0.42]
-            t = Table(table_data, colWidths=col_widths)
+            cw = [page_width*0.12, page_width*0.15, page_width*0.18, page_width*0.13, page_width*0.42]
+            t = Table(table_data, colWidths=cw)
             t.setStyle(TableStyle([
                 ('BACKGROUND', (0,0), (-1,0), RED),
                 ('TEXTCOLOR', (0,0), (-1,0), WHITE),
-                ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                ('FONTNAME', (0,0), (-1,0), FONT_BOLD),
                 ('FONTSIZE', (0,0), (-1,-1), 7.5),
                 ('ALIGN', (0,0), (-1,0), 'CENTER'),
                 ('ALIGN', (0,1), (0,-1), 'CENTER'),
@@ -398,20 +800,13 @@ def build_pdf(data):
     total_deductions = reconciliation.get('total_deductions', 0)
     montant_reverser = reconciliation.get('montant_reverser', 0)
 
-    # Lamako Rewards
-    rewards_enabled = reconciliation.get('lamako_rewards_enabled', False)
-    rewards_discount = reconciliation.get('lamako_rewards_discount', 0)
-    rewards_org_share = reconciliation.get('lamako_rewards_organizer_share', 0)
-    rewards_tbl_share = reconciliation.get('lamako_rewards_tbl_share', 0)
-
-    # Sous-total after Lamako deductions
     comm_total = commissions.get('total_comm', 0)
     retrait_total = commissions.get('total_retrait', 0)
     sous_total_lamako = recette_nette - comm_total - retrait_total - frais_fixes_r
     if partenariat:
         sous_total_lamako -= partenariat
 
-    def recon_row(label, value, indent=False, bold=False, bg=WHITE, text_color=DARK, negative=True):
+    def recon_row(label, value, indent=False, bold=False, text_color=DARK, negative=True):
         prefix = '     ' if indent else ''
         sign = '- ' if negative and value != 0 else ''
         lbl = f'<b>{prefix}{label}</b>' if bold else f'{prefix}{label}'
@@ -420,7 +815,7 @@ def build_pdf(data):
             val_str = f'<b>{val_str}</b>'
         return [Paragraph(lbl, styles['Normal2']), Paragraph(val_str, ParagraphStyle('RVal', parent=styles['Normal2'], alignment=TA_RIGHT, textColor=text_color))]
 
-    def section_header(text, bg=DARK):
+    def section_header(text):
         return [Paragraph(f'<b><font color="white">{text}</font></b>', ParagraphStyle('SH', parent=styles['Normal2'], textColor=WHITE)), '']
 
     recon_data = []
@@ -441,7 +836,7 @@ def build_pdf(data):
         recon_data.append(recon_row('(-) Partenariat / Frais marketing', partenariat, indent=True))
     recon_data.append(recon_row('= Sous-total après déductions Lamako', sous_total_lamako, bold=True, negative=False))
 
-    # C — ESPÈCES & ENCAISSEMENTS GUICHET CLIENT
+    # C — ENCAISSEMENTS GUICHET CLIENT
     recon_data.append(section_header('C — ENCAISSEMENTS GUICHET CLIENT'))
     if cash_client:
         recon_data.append(recon_row('(-) Espèces + chèques encaissés par Guichet Client', cash_client, indent=True))
@@ -452,11 +847,6 @@ def build_pdf(data):
 
     total_client = cash_client + non_cash_client
 
-    # D — LAMAKO REWARDS (if enabled)
-    if rewards_enabled and rewards_discount > 0:
-        recon_data.append(section_header('D — LAMAKO REWARDS'))
-        recon_data.append(recon_row(f'(-) Remises Lamako Rewards (part organisateur)', rewards_org_share, indent=True))
-
     # MONTANT NET
     recon_data.append([
         Paragraph(f'<b><font color="white">■ MONTANT NET À REVERSER À L\'ORGANISATEUR</font></b>',
@@ -465,10 +855,9 @@ def build_pdf(data):
                   ParagraphStyle('MRV', parent=styles['Normal2'], alignment=TA_RIGHT, textColor=WHITE))
     ])
 
-    col_widths = [page_width*0.75, page_width*0.25]
-    t = Table(recon_data, colWidths=col_widths)
+    col_widths_r = [page_width*0.75, page_width*0.25]
+    t = Table(recon_data, colWidths=col_widths_r)
 
-    # Build style
     style_cmds = [
         ('FONTSIZE', (0,0), (-1,-1), 8),
         ('TOPPADDING', (0,0), (-1,-1), 4),
@@ -478,15 +867,12 @@ def build_pdf(data):
         ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
     ]
 
-    # Color section headers and final row
     for i, row in enumerate(recon_data):
         if isinstance(row[0], Paragraph) and 'white' in row[0].text.lower() and '■' not in row[0].text:
             style_cmds.append(('BACKGROUND', (0,i), (-1,i), DARK))
-            style_cmds.append(('SPAN', (0,i), (-1,i)) if row[1] == '' else ('BACKGROUND', (0,i), (-1,i), DARK))
         elif isinstance(row[0], Paragraph) and '■' in row[0].text:
             style_cmds.append(('BACKGROUND', (0,i), (-1,i), TEAL))
 
-    # Alternate row backgrounds for non-header rows
     row_idx = 0
     for i, row in enumerate(recon_data):
         is_header = isinstance(row[0], Paragraph) and ('white' in row[0].text.lower())
@@ -532,7 +918,7 @@ def build_pdf(data):
 # ─── Routes ────────────────────────────────────────────────────────────────────
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'service': 'lamako-pdf-server', 'status': 'ok'})
+    return jsonify({'service': 'lamako-pdf-server', 'version': '2.0', 'status': 'ok'})
 
 
 @app.route('/generate-pdf', methods=['POST'])
@@ -547,7 +933,8 @@ def generate_pdf():
             download_name='rapport_lamako.pdf'
         )
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        import traceback
+        return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
 
 
 if __name__ == '__main__':
